@@ -5,6 +5,25 @@ import { z } from "zod";
 import { atomicWrite, sha256OfFile, sweepStaleTempFiles } from "./util.js";
 import type { AuditContext, AuditMode, AuditRecord, AuditState, PhaseStatus } from "./types.js";
 
+const KnowledgeBaseReferenceSchema = z.object({
+  source_kind: z.enum([
+    "explicit-file",
+    "explicit-directory",
+    "raw",
+    "auto-discovered",
+    "resumed",
+    "prior-knowledge-base-run",
+  ]),
+  source_label: z.string(),
+  manifest_path: z.string(),
+  corpus_path: z.string(),
+  seed_path: z.string(),
+  file_count: z.number().int().nonnegative(),
+  total_bytes: z.number().int().nonnegative(),
+  aggregate_sha256: z.string(),
+  adopted_from_audit_id: z.string().optional(),
+});
+
 /**
  * Agent-driven (interactive harness) runs write `audit-state.json` themselves and
  * occasionally drift from our canonical status vocabulary — most commonly
@@ -62,6 +81,7 @@ const AuditRecordSchema = z.object({
   branch: z.string().nullable().default(null),
   repository: z.string().nullable().default(null),
   history_available: z.boolean().optional(),
+  source_snapshot_clean: z.boolean().optional(),
   mode: z.string(),
   model: z.string().nullable(),
   agent_sdk: z.string(),
@@ -82,6 +102,7 @@ const AuditRecordSchema = z.object({
     .object({
       focus: z.string().optional(),
       expected_behaviors: z.string().optional(),
+      knowledge_base: KnowledgeBaseReferenceSchema.optional(),
     })
     .optional(),
   triggered_via: z.string().optional(),
@@ -240,7 +261,10 @@ export class StateStore {
 
   async updateAudit(
     auditId: string,
-    update: Partial<Pick<AuditRecord, "status" | "completed_at" | "model" | "usage">>,
+    update: Partial<Pick<
+      AuditRecord,
+      "status" | "completed_at" | "model" | "usage" | "source_snapshot_clean"
+    >>,
   ): Promise<void> {
     return this.withWriteLock(async () => {
       const state = await this.load();
@@ -341,9 +365,27 @@ export function findResumableAudit(audits: AuditRecord[], mode: AuditMode): Audi
     [...audits]
       .reverse()
       .find(
-        (a) => a.mode === mode && (a.status === "in_progress" || a.status === "failed" || a.status === "aborted"),
+        (a) => a.mode === mode && isResumableAudit(a),
       ) ?? null
   );
+}
+
+/** Resolve the exact resumable record selected by a higher-level router. */
+export function findResumableAuditById(
+  audits: AuditRecord[],
+  auditId: string,
+  mode?: AuditMode,
+): AuditRecord | null {
+  return audits.find(
+    (audit) =>
+      audit.audit_id === auditId &&
+      (mode === undefined || audit.mode === mode) &&
+      isResumableAudit(audit),
+  ) ?? null;
+}
+
+function isResumableAudit(audit: AuditRecord): boolean {
+  return audit.status === "in_progress" || audit.status === "failed" || audit.status === "aborted";
 }
 
 export function newAuditRecord(opts: {
@@ -355,6 +397,7 @@ export function newAuditRecord(opts: {
   branch: string | null;
   repository: string | null;
   historyAvailable: boolean;
+  sourceSnapshotClean?: boolean;
   phaseIds: string[];
   startedAt?: string;
   context?: AuditContext;
@@ -368,6 +411,9 @@ export function newAuditRecord(opts: {
     branch: opts.branch,
     repository: opts.repository,
     history_available: opts.historyAvailable,
+    ...(opts.sourceSnapshotClean !== undefined
+      ? { source_snapshot_clean: opts.sourceSnapshotClean }
+      : {}),
     mode: opts.mode,
     model: opts.model,
     agent_sdk: opts.agent_sdk,
@@ -387,6 +433,7 @@ export function newAuditRecord(opts: {
 function hasContextContent(c: AuditContext): boolean {
   return (
     (typeof c.focus === "string" && c.focus.length > 0) ||
-    (typeof c.expected_behaviors === "string" && c.expected_behaviors.length > 0)
+    (typeof c.expected_behaviors === "string" && c.expected_behaviors.length > 0) ||
+    c.knowledge_base !== undefined
   );
 }
