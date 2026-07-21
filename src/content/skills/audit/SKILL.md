@@ -139,12 +139,12 @@ Prefer the bundled helpers over reimplementing their logic:
 ```bash
 python3 ~/.config/vigolium-audit/runtime-skills/audit/scripts/consolidate_drafts.py vigolium-results
 python3 ~/.config/vigolium-audit/runtime-skills/audit/scripts/partition_findings.py vigolium-results
-python3 ~/.config/vigolium-audit/runtime-skills/audit/scripts/stamp_file_state.py --target .
 ```
 
 - `consolidate_drafts.py` assigns stable severity IDs and materializes both finding buckets.
 - `partition_findings.py` moves non-executed PoCs to the theoretical bucket without changing IDs.
-- `stamp_file_state.py` writes the incremental SHA-256 snapshot consumed by diff mode.
+
+`vigolium-results/file-state.json` has no helper: the engine stamps it after the run. Never write it from inside the audit.
 
 Treat helper failures as specified by the active command. Never falsify their output to satisfy a gate.
 

@@ -20,7 +20,7 @@ Most audit modes write these shared artifacts:
 | Path | Purpose |
 | --- | --- |
 | `vigolium-results/audit-state.json` | Resumable run state, phase status, retry metadata, repository identity, model + agent SDK, and completion status. |
-| `vigolium-results/file-state.json` | Per-source-file scan record (SHA-256, last audits, last phases). Backs `/vigolium-audit:diff`. |
+| `vigolium-results/file-state.json` | Per-source-file SHA-256 baseline plus the audits that stamped each file. Written by the engine after a complete audit; read by `vigolium-audit incremental-scope`. |
 | `vigolium-results/attack-surface/` | Durable audit context: recon, KB, SAST summaries, probe summaries, authz/concurrency/spec audits, cross-service edges. |
 | `vigolium-results/attack-surface/knowledge-base-input/` | Immutable source copies, combined corpus, and hash/provenance manifest for `--knowledge-base`, `--knowledge-base-raw`, auto-discovered docs, or an adopted standalone KB report. Present only when input was resolved. |
 | `vigolium-results/attack-surface/knowledge-base-seed.md` | KB0's cited security-oriented extraction of application docs. Present only when KB0 runs. |

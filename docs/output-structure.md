@@ -80,7 +80,7 @@ These paths are the primary outputs to keep after a run:
 | Path | Produced by | Description |
 | --- | --- | --- |
 | `vigolium-results/audit-state.json` | every audit mode | Run history, mode, status, phases, retry metadata, repository identity, model + agent SDK, and (when present) usage totals. The orchestrator reads/writes this on every phase transition. |
-| `vigolium-results/file-state.json` | every audit mode | Per-source-file scan record with SHA-256, the audits each file appeared in, and the phases it was scanned by. Used by `/vigolium-audit:diff` to compute incremental scope. |
+| `vigolium-results/file-state.json` | every audit mode | Per-source-file SHA-256 baseline, the audits each file appeared in, and `audit_phases` — the phases that ran in the audit that stamped the file (identical for every file in a run; not per-file attribution). Written by the engine after a complete audit over git-tracked files only; read by `vigolium-audit incremental-scope`. |
 | `vigolium-results/revisit-audit-state.json` | revisit | Round-N revisit state, kept separately so the original `audit-state.json` from round 1 stays intact. |
 | `vigolium-results/attack-surface/` | knowledge-base, lite, balanced, deep, diff, revisit, merge | Durable knowledge base used by later phases: staged application docs, recon, advisories, KB, SAST, probes, chamber summaries, authz/concurrency/spec audits, intent reconciliation, and merge summaries. |
 | `vigolium-results/attack-surface/knowledge-base-input/` | conditional KB0 in knowledge-base/lite/balanced/deep | Immutable exact source copies plus `manifest.json` and `corpus.md`. Present only when a flag, auto-discovered `knowledge-base/` folder, or adopted standalone report supplied input. |

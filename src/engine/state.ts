@@ -148,19 +148,59 @@ function migrateAuditState(data: AuditState): void {
 const FILENAME_AUDIT = "audit-state.json";
 const FILENAME_FILE = "file-state.json";
 
+/** @see CURRENT_AUDIT_SCHEMA_VERSION — same contract, for `file-state.json`. */
+export const CURRENT_FILE_SCHEMA_VERSION = 2 as const;
+
 const FileStateSchema = z.object({
-  schema_version: z.literal(1).default(1),
+  schema_version: z.literal(2).default(2),
   files: z.record(
     z.string(),
     z.object({
       sha256: z.string(),
+      /** Most recent audits to stamp this file, oldest first, capped at 5. */
       last_audits: z.array(z.string()),
-      last_phases: z.array(z.string()),
+      /**
+       * Phases that ran in the audit that last stamped this hash — NOT the
+       * phases that read this file. No producer collects per-file attribution,
+       * so every file in one audit carries the same list.
+       */
+      audit_phases: z.array(z.string()),
     }),
   ),
 });
 
 export type FileState = z.infer<typeof FileStateSchema>;
+
+/**
+ * v1 called this field `last_phases` and capped it at five entries, which read
+ * as per-file attribution but never was: both producers stamped the audit's
+ * whole phase set onto every file, and the cap silently kept an arbitrary
+ * subset (the Python stamper sorted phase IDs as strings, so a 12-phase deep
+ * audit persisted D5-D9 and dropped D1-D4). v2 renames the field to what it
+ * always meant and drops the cap — phase sets are bounded by the mode's YAML
+ * graph, so they can't grow without limit.
+ *
+ * Carried v1 values stay truncated; the next audit overwrites them wholesale.
+ * Migrating rather than invalidating keeps the sha256 baseline, which is the
+ * half that actually drives incremental scope.
+ */
+function migrateFileState(json: unknown): unknown {
+  if (!json || typeof json !== "object") return json;
+  const root = json as { schema_version?: unknown; files?: unknown };
+  if (root.schema_version !== 1) return json;
+  if (root.files && typeof root.files === "object") {
+    for (const entry of Object.values(root.files as Record<string, unknown>)) {
+      if (!entry || typeof entry !== "object") continue;
+      const rec = entry as { last_phases?: unknown; audit_phases?: unknown };
+      if (rec.audit_phases === undefined && rec.last_phases !== undefined) {
+        rec.audit_phases = rec.last_phases;
+      }
+      delete rec.last_phases;
+    }
+  }
+  root.schema_version = CURRENT_FILE_SCHEMA_VERSION;
+  return json;
+}
 
 export class StateStore {
   /**
@@ -284,10 +324,22 @@ export class StateStore {
 
   async loadFileState(): Promise<FileState> {
     if (!existsSync(this.filePath())) {
-      return { schema_version: 1, files: {} };
+      return { schema_version: CURRENT_FILE_SCHEMA_VERSION, files: {} };
     }
     const raw = await readFile(this.filePath(), "utf8");
-    const parsed = FileStateSchema.safeParse(JSON.parse(raw));
+    let json: unknown;
+    try {
+      json = JSON.parse(raw);
+    } catch (err) {
+      throw new Error(`file-state.json: invalid JSON: ${(err as Error).message}`);
+    }
+    const version = peekSchemaVersion(json);
+    if (version !== null && version > CURRENT_FILE_SCHEMA_VERSION) {
+      throw new Error(
+        `file-state.json: schema_version ${version} is newer than this build supports (${CURRENT_FILE_SCHEMA_VERSION}); upgrade vigolium-audit`,
+      );
+    }
+    const parsed = FileStateSchema.safeParse(migrateFileState(json));
     if (!parsed.success) throw new Error(`file-state.json: schema mismatch: ${parsed.error.message}`);
     return parsed.data;
   }
@@ -298,19 +350,29 @@ export class StateStore {
 
   /**
    * Hash each file in `files` (relative to targetDir) and merge into
-   * file-state.json with the given audit + phase attribution. last_audits /
-   * last_phases keep the most recent five entries each — enough for diff /
-   * incremental routing without unbounded growth.
+   * file-state.json. This is the only producer of the file — the audit content
+   * must not write it directly, or the index picks up paths git doesn't track.
+   *
+   * `last_audits` accumulates across runs (capped at 5; audits are unbounded).
+   * `audit_phases` is overwritten with this audit's completed phases: it
+   * describes the stamping audit, not the file, so merging prior values would
+   * only blur which run the hash belongs to.
    */
   async recordFileSnapshot(args: {
     targetDir: string;
     files: string[];
     auditId: string;
     completedPhaseIds: string[];
+    /**
+     * Drop entries absent from `files`, so deletions leave the index. Only
+     * correct when `files` is the complete set for the target — a partial list
+     * would silently discard the rest of the baseline.
+     */
+    prune?: boolean;
   }): Promise<void> {
     return this.withWriteLock(async () => {
       const existing = await this.loadFileState().catch(() => ({
-        schema_version: 1 as const,
+        schema_version: CURRENT_FILE_SCHEMA_VERSION,
         files: {} as FileState["files"],
       }));
       // Parallelize the hashing — IO-bound and the file count can run into
@@ -318,13 +380,17 @@ export class StateStore {
       const hashes = await Promise.all(
         args.files.map(async (rel) => ({ rel, sha: await sha256OfFile(join(args.targetDir, rel)) })),
       );
+      const next: FileState["files"] = args.prune ? {} : existing.files;
       for (const { rel, sha } of hashes) {
         if (sha === null) continue;
         const prev = existing.files[rel];
-        const lastAudits = appendUnique(prev?.last_audits ?? [], args.auditId, 5);
-        const lastPhases = mergeUnique(prev?.last_phases ?? [], args.completedPhaseIds, 5);
-        existing.files[rel] = { sha256: sha, last_audits: lastAudits, last_phases: lastPhases };
+        next[rel] = {
+          sha256: sha,
+          last_audits: appendUnique(prev?.last_audits ?? [], args.auditId, 5),
+          audit_phases: [...args.completedPhaseIds],
+        };
       }
+      existing.files = next;
       await this.saveFileState(existing);
     });
   }
@@ -334,18 +400,6 @@ function appendUnique(list: string[], item: string, cap: number): string[] {
   const filtered = list.filter((x) => x !== item);
   filtered.push(item);
   return filtered.slice(-cap);
-}
-
-function mergeUnique(existing: string[], incoming: string[], cap: number): string[] {
-  const seen = new Set(existing);
-  const out = [...existing];
-  for (const v of incoming) {
-    if (!seen.has(v)) {
-      seen.add(v);
-      out.push(v);
-    }
-  }
-  return out.slice(-cap);
 }
 
 export function buildAuditId(now: Date = new Date()): string {

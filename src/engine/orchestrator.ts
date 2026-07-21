@@ -455,6 +455,9 @@ export class Orchestrator {
             files,
             auditId,
             completedPhaseIds,
+            // `files` is the full tracked set, so entries missing from it are
+            // deletions rather than an incomplete list.
+            prune: true,
           });
         }
       } catch {
